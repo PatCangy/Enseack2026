@@ -25,3 +25,16 @@ A hackathon project that analyzes songs, extracts musical features, recommends t
 python -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+
+## software aplication file structure
+```bash
+DJ_project/
+|-- app.py
+|-- jamendo_client.py
+|-- dj_agent.py
+|-- config.py
+|-- music_cache/
+|	|--chill/
+|	|--hype/
+|--data/
+	|--track_history.json
