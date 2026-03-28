@@ -1,26 +1,42 @@
 [
   {
-    "path": "/Users/erasteboko/Documents/ENSEA/Enseack2026/DJ_project/track_cache/1894568.mp3",
-    "tempo": 79.51,
-    "rms": 0.1411542147397995,
-    "centroid": 1225.1867387432692,
-    "bandwidth": 1732.4651194368544,
-    "mood": "ENERGETIC"
+    "path": "/Users/erasteboko/Documents/ENSEA/Enseack2026/DJ_project/track_cache/1445590.mp3",
+    "tempo": 120.19,
+    "rms": 0.2170691341161728,
+    "centroid": 2862.091368861551,
+    "bandwidth": 2990.4981837750006,
+    "mood": "WARM",
+    "audio_mood": "HYPE",
+    "genre_tags": [
+      "house",
+      "funk",
+      "dance"
+    ]
   },
   {
-    "path": "/Users/erasteboko/Documents/ENSEA/Enseack2026/DJ_project/track_cache/802183.mp3",
-    "tempo": 97.51,
-    "rms": 0.12913918495178223,
-    "centroid": 2686.8801067436675,
-    "bandwidth": 3100.0977623794,
-    "mood": "ENERGETIC"
+    "path": "/Users/erasteboko/Documents/ENSEA/Enseack2026/DJ_project/track_cache/1466372.mp3",
+    "tempo": 126.05,
+    "rms": 0.1708657443523407,
+    "centroid": 3794.075693851402,
+    "bandwidth": 3513.0514301173675,
+    "mood": "WARM",
+    "audio_mood": "ENERGETIC",
+    "genre_tags": [
+      "house",
+      "funk"
+    ]
   },
   {
-    "path": "/Users/erasteboko/Documents/ENSEA/Enseack2026/DJ_project/track_cache/1327518.mp3",
-    "tempo": 99.38,
-    "rms": 0.13945221900939941,
-    "centroid": 2556.2799391238714,
-    "bandwidth": 2778.0947652724867,
-    "mood": "ENERGETIC"
+    "path": "/Users/erasteboko/Documents/ENSEA/Enseack2026/DJ_project/track_cache/1194179.mp3",
+    "tempo": 126.05,
+    "rms": 0.13299399614334106,
+    "centroid": 3309.5201368017665,
+    "bandwidth": 3384.9681747896643,
+    "mood": "WARM",
+    "audio_mood": "ENERGETIC",
+    "genre_tags": [
+      "house",
+      "funk"
+    ]
   }
 ]

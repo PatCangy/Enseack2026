@@ -1,306 +1,287 @@
-# dj_agent.py
-
 from config import MOOD_TAGS, MOOD_BPM, MOOD_MIN_RMS
 
 
 class DJAgent:
     def __init__(self, jamendo_client, track_cache):
         self.jamendo_client = jamendo_client
-        self.track_cache    = track_cache
-        self.current_mood   = "CALM"
+        self.track_cache = track_cache
+        self.current_mood = "CALM"
         self.energy_history = []
 
-    # ------------------------------------------------------------------
-    # Mood classification
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------
 
-    def classify_mood_raw(self, room_energy):
-        if room_energy <= 3:
-            return "CALM"
-        elif room_energy <= 6:
-            return "WARM"
-        elif room_energy <= 8:
-            return "ENERGETIC"
-        return "HYPE"
-
-    def update_energy_history(self, room_energy, max_len=5):
-        self.energy_history.append(room_energy)
-        if len(self.energy_history) > max_len:
-            self.energy_history.pop(0)
-
-    def get_energy_trend(self):
-        if len(self.energy_history) < 3:
-            return "stable"
-        diff = self.energy_history[-1] - self.energy_history[0]
-        if diff >= 2:
-            return "rising"
-        elif diff <= -2:
-            return "falling"
-        return "stable"
-
-    def mood_index(self, mood):
-        return ["CALM", "WARM", "ENERGETIC", "HYPE"].index(mood)
-
-    def mood_from_index(self, index):
-        order = ["CALM", "WARM", "ENERGETIC", "HYPE"]
-        return order[max(0, min(index, len(order) - 1))]
-
-    def apply_trend_to_mood(self, base_mood):
-        trend = self.get_energy_trend()
-        idx   = self.mood_index(base_mood)
-        if trend == "rising":
-            idx += 1
-        elif trend == "falling":
-            idx -= 1
-        return self.mood_from_index(idx)
-
-    def classify_mood(self, room_energy):
-        self.update_energy_history(room_energy)
-        raw_mood   = self.classify_mood_raw(room_energy)
-        trend_mood = self.apply_trend_to_mood(raw_mood)
-
-        if self.current_mood == "CALM":
-            if self.mood_index(trend_mood) >= self.mood_index("WARM") and room_energy >= 5:
-                return "WARM"
-            return "CALM"
-
-        elif self.current_mood == "WARM":
-            if self.mood_index(trend_mood) <= self.mood_index("CALM") and room_energy <= 2:
-                return "CALM"
-            elif self.mood_index(trend_mood) >= self.mood_index("ENERGETIC") and room_energy >= 7:
-                return "ENERGETIC"
-            return "WARM"
-
-        elif self.current_mood == "ENERGETIC":
-            if self.mood_index(trend_mood) <= self.mood_index("WARM") and room_energy <= 5:
-                return "WARM"
-            elif self.mood_index(trend_mood) >= self.mood_index("HYPE") and room_energy >= 9:
-                return "HYPE"
-            return "ENERGETIC"
-
-        elif self.current_mood == "HYPE":
-            if self.mood_index(trend_mood) <= self.mood_index("ENERGETIC") and room_energy <= 7:
-                return "ENERGETIC"
-            return "HYPE"
-
-        return trend_mood
-
-    # ------------------------------------------------------------------
-    # Hard gate — runs AFTER librosa enrichment, not before
-    # ------------------------------------------------------------------
-
-    def _passes_hard_gates(self, track, mood):
-        """
-        Called after enrich_track() has injected real BPM and RMS from librosa.
-        At this point bpm is never None — if enrich_track failed, the track
-        was already removed from the candidate list in prototype_app.py.
-
-        Gate 1 — BPM sanity range (55–180 BPM).
-          librosa occasionally detects half-tempo or double-tempo. A track
-          detected at 45 BPM is almost always a 90 BPM track at half detection.
-          We correct half-tempo by doubling, and double-tempo by halving.
-
-        Gate 2 — RMS energy floor.
-          Rejects genuinely quiet/ambient tracks that slipped through the tag filter.
-        """
-        bpm = track.get("bpm")
-        rms = track.get("rms")
-
-        if bpm is None:
-            return False
-
-        bpm = float(bpm)
-
-        # Correct librosa half-tempo detection (common for 4/4 dance tracks)
-        if bpm < 55:
-            bpm *= 2
-            track["bpm"] = round(bpm, 2)
-
-        # Correct librosa double-tempo detection
-        if bpm > 180:
-            bpm /= 2
-            track["bpm"] = round(bpm, 2)
-
-        # After correction, hard reject anything still out of range
-        if not (55 <= bpm <= 180):
-            return False
-
-        # RMS energy floor
-        if rms is not None:
-            min_rms = MOOD_MIN_RMS.get(mood, 0.0)
-            if float(rms) < min_rms:
-                return False
-
-        return True
-
-    # ------------------------------------------------------------------
-    # Scoring helpers
-    # ------------------------------------------------------------------
+    def _safe_float(self, value, default=None):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return default
 
     def extract_genre_tags(self, track):
+        # First try direct genre_tags
+        direct_tags = track.get("genre_tags", [])
+        if isinstance(direct_tags, list) and direct_tags:
+            return [str(tag).lower() for tag in direct_tags]
+
+        # Then try Jamendo nested tags
         tags = track.get("tags", {})
         if isinstance(tags, dict):
             genres = tags.get("genres", [])
             if isinstance(genres, list):
-                return [g.lower() for g in genres]
+                return [str(g).lower() for g in genres]
+
         return []
 
-    def genre_continuity_score(self, track_genres, recent_genres, target_tags):
-        score = 0
-        for tag in target_tags:
-            if tag.lower() in track_genres:
-                score += 3
-        for genre in track_genres:
-            if genre in recent_genres:
-                score += 2
-        return score
-
-    def anti_hard_switch_penalty(self, track_genres, recent_genres, target_tags):
-        if not track_genres:
-            return 0
-        matches_recent = any(g in recent_genres for g in track_genres)
-        matches_target = any(g in [t.lower() for t in target_tags] for g in track_genres)
-        if recent_genres and not matches_recent and not matches_target:
-            return -4
-        return 0
-
-    def transition_score(self, previous_track, current_track):
-        score = 0
-
-        prev_bpm    = previous_track.get("bpm")
-        curr_bpm    = current_track.get("bpm")
-        prev_key    = previous_track.get("key")
-        curr_key    = current_track.get("key")
-        prev_genres = previous_track.get("genre_tags", [])
-        curr_genres = current_track.get("genre_tags", [])
-
-        if prev_bpm is not None and curr_bpm is not None:
-            diff = abs(float(prev_bpm) - float(curr_bpm))
-            if diff <= 3:
-                score += 5
-            elif diff <= 6:
-                score += 3
-            elif diff <= 10:
-                score += 1
-            else:
-                score -= 2
-
-        if prev_key and curr_key and prev_key == curr_key:
-            score += 3
-
-        if prev_genres and curr_genres:
-            shared = set(prev_genres) & set(curr_genres)
-            score += 4 if shared else -2
-
-        return score
-
-    def base_score_track(self, track, mood):
-        score = 0
-
-        bpm              = track.get("bpm")
-        key              = track.get("key")
+    def target_bpm_center(self, mood):
         bpm_min, bpm_max = MOOD_BPM[mood]
-        target_tags      = MOOD_TAGS[mood]
-        recent_genres    = self.track_cache.get_recent_genres(recent_limit=5)
-        track_genres     = self.extract_genre_tags(track)
+        return (bpm_min + bpm_max) / 2
+
+    # ------------------------------------------------------------
+    # 1) Mood from room energy
+    # ------------------------------------------------------------
+
+    def classify_mood(self, room_energy):
+        """
+        Direct mapping from room energy to target mood.
+        This is what you want for the prototype:
+        1-3  -> CALM
+        4-6  -> WARM
+        7-8  -> ENERGETIC
+        9-10 -> HYPE
+        """
+        room_energy = max(1, min(10, int(room_energy)))
+
+        if room_energy <= 3:
+            mood = "CALM"
+        elif room_energy <= 6:
+            mood = "WARM"
+        elif room_energy <= 8:
+            mood = "ENERGETIC"
+        else:
+            mood = "HYPE"
+
+        self.current_mood = mood
+        self.energy_history.append(room_energy)
+        if len(self.energy_history) > 5:
+            self.energy_history.pop(0)
+
+        return mood
+
+    # ------------------------------------------------------------
+    # 2) Hard gate
+    # ------------------------------------------------------------
+
+    def _passes_hard_gates(self, track, mood):
+        bpm = self._safe_float(track.get("bpm"))
+        rms = self._safe_float(track.get("rms"))
+
+        if bpm is None:
+            return False
+
+        # Fix common half-tempo detection
+        if bpm < 55:
+            bpm *= 2
+
+        # Fix common double-tempo detection
+        if bpm > 180:
+            bpm /= 2
+
+        track["bpm"] = round(bpm, 2)
+
+        # Reject weird BPM values
+        if not (55 <= bpm <= 180):
+            return False
+
+        # Reject tracks that are too quiet for the target mood
+        min_rms = MOOD_MIN_RMS.get(mood, 0.0)
+        if rms is None or rms < min_rms:
+            return False
+
+        track["rms"] = rms
+        return True
+
+    def _fits_target_mood_strictly(self, track, mood):
+        """
+        Strict mood check:
+        Prefer tracks inside the target BPM range.
+        """
+        bpm = self._safe_float(track.get("bpm"))
+        if bpm is None:
+            return False
+
+        bpm_min, bpm_max = MOOD_BPM[mood]
+        return bpm_min <= bpm <= bpm_max
+
+    # ------------------------------------------------------------
+    # 3) Scoring: how well a track fits the target mood
+    # ------------------------------------------------------------
+
+    def mood_fit_score(self, track, mood):
+        score = 0
+
+        bpm = self._safe_float(track.get("bpm"))
+        rms = self._safe_float(track.get("rms"), 0.0)
+        key = track.get("key")
+        target_tags = [tag.lower() for tag in MOOD_TAGS[mood]]
+        track_genres = self.extract_genre_tags(track)
+        recent_genres = self.track_cache.get_recent_genres(recent_limit=5)
 
         track["genre_tags"] = track_genres
 
+        # BPM score: strong preference for target mood BPM
         if bpm is not None:
-            bpm = float(bpm)
-            if bpm_min <= bpm <= bpm_max:
-                score += 5
-            else:
-                distance = min(abs(bpm - bpm_min), abs(bpm - bpm_max))
-                if distance <= 10:
-                    score += 2
+            bpm_min, bpm_max = MOOD_BPM[mood]
+            bpm_center = self.target_bpm_center(mood)
 
+            if bpm_min <= bpm <= bpm_max:
+                score += 10
+            else:
+                distance = abs(bpm - bpm_center)
+                if distance <= 5:
+                    score += 6
+                elif distance <= 10:
+                    score += 3
+                elif distance <= 15:
+                    score += 1
+                else:
+                    score -= 4
+
+        # Genre score: reward tags that match the target mood
+        for genre in track_genres:
+            if genre in target_tags:
+                score += 4
+
+        # Small continuity bonus with recent history
+        for genre in track_genres:
+            if genre in recent_genres:
+                score += 1
+
+        # RMS bonus: stronger moods should prefer stronger tracks
+        min_rms = MOOD_MIN_RMS.get(mood, 0.0)
+        if rms >= min_rms:
+            score += 2
+
+        # Small bonus if key exists
         if key:
             score += 1
 
-        score += self.genre_continuity_score(track_genres, recent_genres, target_tags)
-        score += self.anti_hard_switch_penalty(track_genres, recent_genres, target_tags)
-        score += 1
+        return score
+
+    # ------------------------------------------------------------
+    # 4) Scoring: how similar two tracks are
+    # ------------------------------------------------------------
+
+    def similarity_score(self, track_a, track_b):
+        score = 0
+
+        bpm_a = self._safe_float(track_a.get("bpm"))
+        bpm_b = self._safe_float(track_b.get("bpm"))
+        key_a = track_a.get("key")
+        key_b = track_b.get("key")
+        genres_a = set(track_a.get("genre_tags", []))
+        genres_b = set(track_b.get("genre_tags", []))
+
+        # BPM similarity
+        if bpm_a is not None and bpm_b is not None:
+            diff = abs(bpm_a - bpm_b)
+            if diff <= 2:
+                score += 6
+            elif diff <= 5:
+                score += 4
+            elif diff <= 8:
+                score += 2
+            elif diff > 15:
+                score -= 3
+
+        # Key similarity
+        if key_a and key_b and key_a == key_b:
+            score += 3
+
+        # Genre similarity
+        shared_genres = genres_a & genres_b
+        score += len(shared_genres) * 4
+
+        if genres_a and genres_b and not shared_genres:
+            score -= 2
 
         return score
 
-    # ------------------------------------------------------------------
-    # Main selection — BPM enrichment now happens in prototype_app.py
-    # before this method is called, so all tracks here have real BPM/RMS
-    # ------------------------------------------------------------------
+    # ------------------------------------------------------------
+    # 5) Main selection
+    # ------------------------------------------------------------
 
     def choose_tracks_from_enriched(self, tracks, mood, limit=5):
-        """
-        Called after tracks have been downloaded and enriched by librosa.
-        Applies the hard gate, scores, and returns the best ordered selection.
-        """
-        # Hard gate with real BPM/RMS
-        passed   = [t for t in tracks if self._passes_hard_gates(t, mood)]
+        # Step 1: hard gate
+        passed = [t for t in tracks if self._passes_hard_gates(t, mood)]
         rejected = len(tracks) - len(passed)
+
         if rejected:
             print(f"  [agent] Rejected {rejected} track(s) — BPM out of range or too quiet")
-        print(f"  [agent] {len(passed)} track(s) passed the gate")
+        print(f"  [agent] {len(passed)} track(s) passed the hard gate")
 
         if not passed:
             return []
 
+        # Add genre tags now so later scoring can use them
         for track in passed:
             track["genre_tags"] = self.extract_genre_tags(track)
 
+        # Step 2: prefer tracks that strictly fit the target mood BPM
+        strict_candidates = [t for t in passed if self._fits_target_mood_strictly(t, mood)]
+
+        if strict_candidates:
+            pool = strict_candidates
+            print(f"  [agent] {len(pool)} track(s) strictly match target mood {mood}")
+        else:
+            pool = passed
+            print(f"  [agent] No strict {mood} matches, using best available fallback tracks")
+
+        # Step 3: rank by mood fit
         ranked = sorted(
-            [(self.base_score_track(t, mood), t) for t in passed],
-            key=lambda x: x[0],
-            reverse=True,
+            pool,
+            key=lambda t: self.mood_fit_score(t, mood),
+            reverse=True
         )
 
-        remaining = [t for _, t in ranked]
-        selected  = [remaining.pop(0)]
+        if not ranked:
+            return []
 
-        while remaining and len(selected) < limit:
-            previous   = selected[-1]
-            best_next  = None
+        # Step 4: choose first seed track = strongest match to target mood
+        selected = [ranked.pop(0)]
+
+        # Step 5: choose next tracks that both:
+        # - still fit the target mood
+        # - are similar to the selected tracks
+        while ranked and len(selected) < limit:
+            best_track = None
             best_score = float("-inf")
 
-            for candidate in remaining:
-                score = self.base_score_track(candidate, mood)
-                score += self.transition_score(previous, candidate)
+            for candidate in ranked:
+                score = self.mood_fit_score(candidate, mood)
+
+                # Similar to first selected track
+                score += self.similarity_score(selected[0], candidate)
+
+                # Similar to the most recent selected track
+                score += self.similarity_score(selected[-1], candidate)
+
+                # Small bonus if similar to the whole selected set
+                for prev in selected[1:-1]:
+                    score += 0.5 * self.similarity_score(prev, candidate)
+
                 if score > best_score:
                     best_score = score
-                    best_next  = candidate
+                    best_track = candidate
 
-            if best_next is None:
+            if best_track is None:
                 break
 
-            selected.append(best_next)
-            remaining.remove(best_next)
+            selected.append(best_track)
+            ranked.remove(best_track)
 
-        self.current_mood = mood
+        # Save the target mood on each track
+        for track in selected:
+            track["target_mood"] = mood
+
         return selected
-
-    def classify_mood(self, room_energy):
-        # kept for prototype_app.py to call before fetching
-        self.update_energy_history(room_energy)
-        raw_mood   = self.classify_mood_raw(room_energy)
-        trend_mood = self.apply_trend_to_mood(raw_mood)
-
-        if self.current_mood == "CALM":
-            if self.mood_index(trend_mood) >= self.mood_index("WARM") and room_energy >= 5:
-                return "WARM"
-            return "CALM"
-        elif self.current_mood == "WARM":
-            if self.mood_index(trend_mood) <= self.mood_index("CALM") and room_energy <= 2:
-                return "CALM"
-            elif self.mood_index(trend_mood) >= self.mood_index("ENERGETIC") and room_energy >= 7:
-                return "ENERGETIC"
-            return "WARM"
-        elif self.current_mood == "ENERGETIC":
-            if self.mood_index(trend_mood) <= self.mood_index("WARM") and room_energy <= 5:
-                return "WARM"
-            elif self.mood_index(trend_mood) >= self.mood_index("HYPE") and room_energy >= 9:
-                return "HYPE"
-            return "ENERGETIC"
-        elif self.current_mood == "HYPE":
-            if self.mood_index(trend_mood) <= self.mood_index("ENERGETIC") and room_energy <= 7:
-                return "ENERGETIC"
-            return "HYPE"
-        return trend_mood

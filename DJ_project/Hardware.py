@@ -1,54 +1,35 @@
 # hardware.py
 # ─────────────────────────────────────────────────────────────────────────────
-# STM32 NUCLEO L476RG — Serial Communication Layer
+# Arduino Mega 2560 — Serial Communication Layer
 #
-# This file is the bridge between the Python DJ software and the Nucleo board.
-# It runs alongside prototype_app.py (or your final app) and sends lighting
-# commands to the Nucleo over USB/UART serial.
+# This file is the bridge between the Python DJ software and the Arduino Mega.
+# It runs alongside prototype_app.py and sends lighting commands to the Mega
+# over USB serial.
 #
-# ── What this file does ───────────────────────────────────────────────────────
-#   • Connects to the Nucleo over serial (USB virtual COM port)
-#   • Sends a structured message every 50ms with current mood + RGB + side mask
-#   • Reacts to track transitions: fires a BEAT FLASH then settles to mood color
-#   • Reads ACK responses from the Nucleo (optional, for debugging)
-#   • Handles reconnection automatically if the cable is unplugged mid-demo
-#
-# ── Serial message format sent to Nucleo ─────────────────────────────────────
-#   "MOOD,R,G,B,SIDE\n"
+# ── Serial message format sent to Arduino ────────────────────────────────────
+#   "MOOD,R,G,B,SIDE\n"   — update wave color for next beat
+#   "BEAT,R,G,B,SIDE\n"   — update color AND fire a wave immediately
 #
 #   Field   Type    Range       Description
 #   ──────  ──────  ──────────  ─────────────────────────────────────────────
-#   MOOD    str     CALM etc    Human-readable mood label (for Nucleo debug)
+#   MOOD    str     MOOD/BEAT   Message type prefix
 #   R       int     0–255       Red channel (already scaled by RED_CHANNEL_SCALE)
 #   G       int     0–255       Green channel
 #   B       int     0–255       Blue channel
 #   SIDE    int     0b0001–     Bitmask: which sides of the LED matrix are active
-#                   0b1111      0001=1 side, 0011=2, 0111=3, 1111=all 4
+#                   0b1111      (received by Arduino but not used in this sketch)
 #
 #   Examples:
-#     CALM,0,0,255,1        → blue, 1 side lit
-#     WARM,161,120,0,3      → orange, 2 sides lit
-#     ENERGETIC,161,0,120,7 → pink, 3 sides lit
-#     HYPE,161,0,0,15       → red, all 4 sides lit
-#
-# ── Beat flash message ────────────────────────────────────────────────────────
-#   "BEAT,255,255,255,15\n"
-#   Sent once at each track transition — full white, all sides, for 200ms,
-#   then the Nucleo returns to the mood color automatically.
-#
-# ── What the Nucleo firmware needs to do ─────────────────────────────────────
-#   1. Read serial line until '\n'
-#   2. Split by ','  → [mood, r, g, b, side]
-#   3. If mood == "BEAT": flash white for 200ms then revert to last mood color
-#   4. Otherwise: set LED matrix to (r, g, b) on the sides defined by the mask
-#   5. (Optional) send back "ACK\n" so Python can confirm delivery
+#     MOOD,0,0,255,1        → blue wave color set
+#     BEAT,255,255,255,15   → white wave triggered immediately
+#     MOOD,161,120,0,3      → orange wave color set
 #
 # ── Wiring ────────────────────────────────────────────────────────────────────
-#   Connect Nucleo to PC via USB-A to Mini-B cable (the same one used for
-#   flashing). The Nucleo exposes a virtual COM port (STLink VCP).
+#   Connect Arduino Mega to PC via USB-A to USB-B cable.
 #   On Mac/Linux it appears as /dev/tty.usbmodem* or /dev/ttyACM0
 #   On Windows it appears as COM3, COM4, etc.
-#   Set SERIAL_PORT in config.py to match your system.
+#   Set SERIAL_PORT in config.py to match your system, or let auto-detect
+#   find it automatically.
 # ─────────────────────────────────────────────────────────────────────────────
 
 import threading
@@ -66,51 +47,54 @@ from config import (
 )
 
 
-# ── Auto-detect Nucleo port ───────────────────────────────────────────────────
+# ── Auto-detect Arduino port ──────────────────────────────────────────────────
 
-def find_nucleo_port():
+def find_arduino_port():
     """
-    Tries to auto-detect the Nucleo's virtual COM port by scanning connected
-    USB serial devices for STMicroelectronics identifiers.
+    Tries to auto-detect the Arduino Mega's COM port by scanning connected
+    USB serial devices. Checks for Arduino, Mega, CH340 (clone boards),
+    FTDI, and STM identifiers.
     Falls back to SERIAL_PORT from config.py if none found.
     """
+    KNOWN_KEYWORDS = ["arduino", "mega", "ch340", "ftdi", "stm", "nucleo", "stlink"]
+
     for port in serial.tools.list_ports.comports():
         desc = (port.description or "").lower()
         mfr  = (port.manufacturer or "").lower()
-        if "stm" in desc or "nucleo" in desc or "stlink" in desc or "stm" in mfr:
-            print(f"  [hardware] Auto-detected Nucleo on {port.device}")
+        if any(kw in desc or kw in mfr for kw in KNOWN_KEYWORDS):
+            print(f"  [hardware] Auto-detected Arduino on {port.device}  ({port.description})")
             return port.device
 
-    print(f"  [hardware] Nucleo not auto-detected. Using config port: {SERIAL_PORT}")
+    print(f"  [hardware] Arduino not auto-detected. Using config port: {SERIAL_PORT}")
     print(f"  [hardware] Available ports:")
     for port in serial.tools.list_ports.comports():
         print(f"             {port.device}  —  {port.description}")
     return SERIAL_PORT
 
 
-# ── NucleoController ──────────────────────────────────────────────────────────
+# ── ArduinoController ─────────────────────────────────────────────────────────
 
-class NucleoController:
+class ArduinoController:
     """
-    Manages the serial connection to the STM32 Nucleo L476RG and sends
+    Manages the serial connection to the Arduino Mega 2560 and sends
     real-time lighting commands based on the current DJ mood.
 
     Usage:
-        nucleo = NucleoController()
-        nucleo.start()
+        arduino = ArduinoController()
+        arduino.start()
 
         # When a new track starts:
-        nucleo.on_track_change(mood="ENERGETIC", track_name="All Night")
+        arduino.on_track_change(mood="ENERGETIC", track_name="All Night")
 
-        # Every frame / on mood update:
-        nucleo.update_mood("ENERGETIC")
+        # On mood update only (no wave trigger):
+        arduino.update_mood("ENERGETIC")
 
         # On shutdown:
-        nucleo.stop()
+        arduino.stop()
     """
 
     def __init__(self, auto_detect=True):
-        port         = find_nucleo_port() if auto_detect else SERIAL_PORT
+        port         = find_arduino_port() if auto_detect else SERIAL_PORT
         self.port    = port
         self.baud    = SERIAL_BAUDRATE
         self.ser     = None
@@ -122,7 +106,6 @@ class NucleoController:
         self._connected   = False
         self._warned_once = False
 
-        # Reader thread — listens for ACK from Nucleo (optional)
         self._reader_thread = None
 
     # ── Connection ────────────────────────────────────────────────────────────
@@ -130,17 +113,17 @@ class NucleoController:
     def _connect(self):
         try:
             self.ser = serial.Serial(self.port, self.baud, timeout=1)
-            # Give the Nucleo 1.5s to boot after connection (STLink resets the MCU)
-            time.sleep(1.5)
+            # Give the Arduino 2s to finish its bootloader reset after connection
+            time.sleep(2.0)
             self._connected   = True
             self._warned_once = False
-            print(f"  [hardware] Connected to Nucleo on {self.port} @ {self.baud} baud")
+            print(f"  [hardware] Connected to Arduino on {self.port} @ {self.baud} baud")
         except serial.SerialException as e:
             self.ser        = None
             self._connected = False
             if not self._warned_once:
                 print(f"  [hardware] Cannot open {self.port}: {e}")
-                print(f"  [hardware] Check SERIAL_PORT in config.py and that the Nucleo is plugged in.")
+                print(f"  [hardware] Check SERIAL_PORT in config.py and that the Arduino is plugged in.")
                 self._warned_once = True
 
     def _disconnect(self):
@@ -156,21 +139,25 @@ class NucleoController:
 
     def _mood_message(self, mood):
         """
-        Builds the standard mood message:
+        Builds a color-update message (no immediate wave trigger):
         "MOOD,R,G,B,SIDE\n"
         """
         r, g, b = MOOD_RGB[mood]
         r       = int(r * RED_CHANNEL_SCALE)
         side    = MOOD_SIDE[mood]
-        return f"{mood},{r},{g},{b},{side}\n"
+        return f"MOOD,{r},{g},{b},{side}\n"
 
-    def _beat_message(self):
+    def _beat_message(self, mood):
         """
-        Beat flash: full white, all 4 sides.
-        "BEAT,255,255,255,15\n"
-        The Nucleo should flash white for ~200ms then return to mood color.
+        Builds a beat message that sets the mood color AND triggers a wave:
+        "BEAT,R,G,B,SIDE\n"
+        Uses the actual mood color (not hardcoded white) so the wave matches
+        the incoming track's mood.
         """
-        return "BEAT,255,255,255,15\n"
+        r, g, b = MOOD_RGB[mood]
+        r       = int(r * RED_CHANNEL_SCALE)
+        side    = MOOD_SIDE[mood]
+        return f"BEAT,{r},{g},{b},{side}\n"
 
     # ── Serial write ──────────────────────────────────────────────────────────
 
@@ -199,28 +186,25 @@ class NucleoController:
     def on_track_change(self, mood, track_name="", artist=""):
         """
         Call this at the START of each new track.
-        Sends a BEAT flash first, then updates the mood color.
-        The Nucleo should show white for ~200ms then settle into the mood color.
+        Sends a BEAT message (triggers wave + sets mood color in one message),
+        then keeps the mood updated for the continuous send loop.
         """
         print(f"  [hardware] Track change → mood={mood}  🎵  {track_name} — {artist}")
 
-        # 1. Send beat flash
-        self._send(self._beat_message())
+        # Single BEAT message: sets color AND fires the wave on the Arduino
+        self._send(self._beat_message(mood))
 
-        # 2. Short pause so the Nucleo can show the flash
-        time.sleep(0.25)
-
-        # 3. Update to new mood color
+        # Update internal mood so the send loop keeps refreshing it
         self.update_mood(mood)
-        self._send(self._mood_message(mood))
 
     # ── Background send loop ──────────────────────────────────────────────────
 
     def _send_loop(self):
         """
         Runs in a background thread.
-        Sends the current mood message every SERIAL_INTERVAL seconds (50ms).
-        This keeps the Nucleo in sync even if a packet is dropped.
+        Sends the current mood color every SERIAL_INTERVAL seconds (50ms).
+        This resets the Arduino's idle timeout so it never falls back to blue
+        while a track is actively playing.
         """
         while self.running:
             with self._lock:
@@ -228,20 +212,19 @@ class NucleoController:
             self._send(self._mood_message(mood))
             time.sleep(SERIAL_INTERVAL)
 
-    # ── Optional: read ACK from Nucleo ────────────────────────────────────────
+    # ── Read ACK from Arduino ─────────────────────────────────────────────────
 
     def _reader_loop(self):
         """
-        Reads lines sent back from the Nucleo (e.g. "ACK\n" or "ERROR\n").
-        This is optional — the Nucleo firmware doesn't have to send anything back.
-        Useful during development to verify the Nucleo is receiving correctly.
+        Reads lines sent back from the Arduino (e.g. "ACK\n").
+        Optional — useful during development to confirm delivery.
         """
         while self.running:
             try:
                 if self.ser and self.ser.is_open and self.ser.in_waiting:
                     line = self.ser.readline().decode("utf-8", errors="ignore").strip()
                     if line:
-                        print(f"  [Nucleo] ← {line}")
+                        print(f"  [Arduino] ← {line}")
             except Exception:
                 pass
             time.sleep(0.01)
@@ -260,36 +243,42 @@ class NucleoController:
         self._reader_thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._reader_thread.start()
 
-        print("  [hardware] NucleoController started")
+        print("  [hardware] ArduinoController started")
 
     def stop(self):
         self.running = False
         time.sleep(0.1)
         self._disconnect()
-        print("  [hardware] NucleoController stopped")
+        print("  [hardware] ArduinoController stopped")
+
+
+# ── Backwards-compatible alias ────────────────────────────────────────────────
+# prototype_app.py imports NucleoController — this keeps it working without
+# touching that file.
+NucleoController = ArduinoController
 
 
 # ── Standalone test ───────────────────────────────────────────────────────────
-# Run this file directly to test the hardware connection without the DJ pipeline.
-# It cycles through all 4 moods with a beat flash between each.
+# Run:  python hardware.py
+# Cycles through all 4 moods with a beat-triggered wave between each.
 
 if __name__ == "__main__":
     print("═" * 55)
-    print("  Nucleo Hardware Test — cycles through all moods")
+    print("  Arduino Mega Hardware Test — cycles through all moods")
     print("  Press Ctrl+C to stop")
     print("═" * 55 + "\n")
 
-    nucleo = NucleoController(auto_detect=True)
-    nucleo.start()
+    arduino = ArduinoController(auto_detect=True)
+    arduino.start()
 
     moods = ["CALM", "WARM", "ENERGETIC", "HYPE"]
 
     try:
-        for cycle in range(2):          # run 2 full cycles
+        for cycle in range(2):
             for mood in moods:
                 print(f"\n  Testing mood: {mood}")
-                nucleo.on_track_change(mood, track_name=f"Test track ({mood})")
-                time.sleep(4)           # hold each mood for 4 seconds
+                arduino.on_track_change(mood, track_name=f"Test track ({mood})")
+                time.sleep(4)
 
         print("\n  Test complete.")
 
@@ -297,4 +286,4 @@ if __name__ == "__main__":
         print("\n  Interrupted by user.")
 
     finally:
-        nucleo.stop()
+        arduino.stop()
