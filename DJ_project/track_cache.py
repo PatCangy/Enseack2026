@@ -8,7 +8,7 @@ from config import HISTORY_FILE
 class TrackCache:
     def __init__(self):
         self.history_file = HISTORY_FILE
-        self.history = self._load_history()
+        self.history      = self._load_history()
 
     def _load_history(self):
         if not os.path.exists(self.history_file):
@@ -22,19 +22,24 @@ class TrackCache:
 
     def was_played_recently(self, track_id, recent_limit=10):
         recent = self.history[-recent_limit:]
-        recent_ids = [track["id"] for track in recent]
-        return track_id in recent_ids
+        return str(track_id) in [str(t["id"]) for t in recent]
 
     def filter_unplayed(self, tracks, recent_limit=10):
-        return [
-            track for track in tracks
-            if not self.was_played_recently(track["id"], recent_limit)
-        ]
+        return [t for t in tracks if not self.was_played_recently(t["id"], recent_limit)]
+
+    def get_recent_genres(self, recent_limit=5):
+        recent = self.history[-recent_limit:]
+        genres = []
+        for track in recent:
+            for genre in track.get("genre_tags", []):
+                genres.append(genre.lower())
+        return genres
 
     def mark_played(self, track):
         self.history.append({
-            "id": track["id"],
-            "name": track["name"],
-            "artist": track["artist"],
+            "id":         str(track["id"]),
+            "name":       track["name"],
+            "artist":     track["artist"],
+            "genre_tags": track.get("genre_tags", []),
         })
         self._save_history()
