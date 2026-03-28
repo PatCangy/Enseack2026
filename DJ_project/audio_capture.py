@@ -1,42 +1,95 @@
-# audio_capture.py
-
-import threading
 import time
 import numpy as np
 import sounddevice as sd
 
 
 class AudioCapture:
-    def __init__(self, interval=0.05, samplerate=44100):
-        self.interval = interval
+    def __init__(self, device=None, samplerate=44100, blocksize=2048):
+        self.device = device
         self.samplerate = samplerate
+        self.blocksize = blocksize
         self.amplitude = 0.0
-        self.running = False
-        self.thread = None
+        self.stream = None
 
-    def _capture_loop(self):
-        frames = int(self.samplerate * self.interval)
+    def _audioCallback(self, indata, frames, timeInfo, status):
+        # Print stream warnings if there are any
+        if status:
+            print(status)
 
-        while self.running:
-            try:
-                data = sd.rec(frames, samplerate=self.samplerate, channels=1, dtype="float32")
-                sd.wait()
-                rms = np.sqrt(np.mean(np.square(data)))
-                self.amplitude = float(rms)
-            except Exception:
-                self.amplitude = 0.0
+        # Compute RMS amplitude from the current audio block
+        rms = np.sqrt(np.mean(indata ** 2))
+        self.amplitude = float(rms)
 
-            time.sleep(self.interval)
+        # Print the current amplitude
+        print(f"Amplitude: {self.amplitude:.6f}")
 
     def start(self):
-        if self.running:
+        # Prevent starting more than one stream
+        if self.stream is not None:
             return
-        self.running = True
-        self.thread = threading.Thread(target=self._capture_loop, daemon=True)
-        self.thread.start()
+
+        self.stream = sd.InputStream(
+            device=self.device,
+            channels=1,
+            samplerate=self.samplerate,
+            blocksize=self.blocksize,
+            dtype="float32",
+            callback=self._audioCallback
+        )
+        self.stream.start()
 
     def stop(self):
-        self.running = False
+        # Stop and close the stream
+        if self.stream is not None:
+            self.stream.stop()
+            self.stream.close()
+            self.stream = None
 
     def get_amplitude(self):
         return self.amplitude
+
+
+def chooseInputDevice():
+    devices = sd.query_devices()
+    inputDevices = []
+
+    print("Available input devices:\n")
+
+    for i, device in enumerate(devices):
+        if device["max_input_channels"] > 0:
+            inputDevices.append(i)
+            print(f"{i}: {device['name']}")
+
+    if not inputDevices:
+        raise RuntimeError("No input devices found.")
+
+    while True:
+        try:
+            choice = input("\nEnter the device number you want to use: ").strip()
+            deviceIndex = int(choice)
+
+            if deviceIndex in inputDevices:
+                return deviceIndex
+            else:
+                print("That is not a valid input device number.")
+        except ValueError:
+            print("Please enter a valid number.")
+
+
+if __name__ == "__main__":
+    try:
+        deviceIndex = chooseInputDevice()
+        print(f"\nUsing device {deviceIndex}\n")
+        print("Start playing audio now. Press Ctrl+C to stop.\n")
+
+        audio = AudioCapture(device=deviceIndex)
+        audio.start()
+
+        while True:
+            time.sleep(0.1)
+
+    except KeyboardInterrupt:
+        print("\nStopping audio capture...")
+        audio.stop()
+    except Exception as e:
+        print(f"Error: {e}")
